@@ -85,3 +85,37 @@ risks being disrupted), every Python component in this project runs
 inside a disposable container on the same Docker network as the
 broker instead, which is also the more portable, more professional way
 to build something meant to be cloned and run by someone else later.
+
+## Day 62 — Validating/Enriching Consumer + Dead-Letter Queue
+
+Built the first processing stage downstream of the raw event stream: a consumer that validates and enriches every order event, splitting the output across two new topics instead of writing bad data forward silently.
+
+**New topics**
+
+- `orders-events-validated` — clean records, enriched, 3 partitions
+- `orders-events-dlq` — rejected records, wrapped with the reason they failed, 3 partitions
+
+**Validation rules**
+
+All required fields present (`order_id`, `customer_id`, `product_id`, `amount`, `status`, `event_timestamp`); `amount` must be a positive number; `status` must be one of `completed`/`pending`/`cancelled`; `customer_id` must fall in the expected range (1000–1999).
+
+**Enrichment on valid records**
+
+Adds `processed_at` (UTC timestamp of when the consumer handled it) and `amount_tier` (`low`/`medium`/`high`, bucketed off `amount`).
+
+**On failure**
+
+The original record is preserved untouched, wrapped with `error_reason`, `failed_at`, and the source partition/offset it came from, then sent to the DLQ — nothing is silently dropped.
+
+**Testing the DLQ path**
+
+Added `producer/inject_bad_events.py`, which sends five deliberately invalid events — one per validation rule — directly onto `orders-events`, so the DLQ path has something real to prove against rather than relying on all-valid traffic.
+
+**Proof**
+
+Ran the consumer against all 205 events sitting in `orders-events` (the 200 good ones from Day 61 plus today's 5 bad ones). Console output: `valid=200 dlq=5`. Verified independently via each output topic's authoritative partition offsets:
+
+- `orders-events-validated`: 72 + 50 + 78 = 200
+- `orders-events-dlq`: 1 + 1 + 3 = 5
+
+200 + 5 = 205 — matches exactly, zero loss anywhere. Inspected all 5 DLQ messages directly and confirmed each `error_reason` matches the rule it was designed to break.
