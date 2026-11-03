@@ -119,3 +119,29 @@ Ran the consumer against all 205 events sitting in `orders-events` (the 200 good
 - `orders-events-dlq`: 1 + 1 + 3 = 5
 
 200 + 5 = 205 — matches exactly, zero loss anywhere. Inspected all 5 DLQ messages directly and confirmed each `error_reason` matches the rule it was designed to break.
+
+
+## Day 63 — Windowed Stream Aggregation (Revenue per Minute)
+
+Added the first real stream-processing stage: a Spark Structured Streaming job that reads the validated event stream and computes revenue in 1-minute tumbling windows, with an independent script verifying its output.
+
+**The job**
+
+`aggregation/windowed_revenue.py` reads from `orders-events-validated`, parses the JSON, casts `event_timestamp` to a proper timestamp, and groups into 1-minute tumbling windows with a 2-minute watermark, aggregating total revenue and order count per window. Output mode `update`, printed to console every 10 seconds, stopping itself after 60.
+
+**Independent verification, not just trust**
+
+Rather than take Spark's console output at face value, wrote `aggregation/verify_revenue.py` — a separate script using plain `kafka-python`, no Spark at all — that reads the same topic and hand-computes the same per-minute totals by bucketing `event_timestamp` to the minute.
+
+**Proof**
+
+Both approaches landed on identical numbers for both windows:
+
+- `22:56–22:57`: total_revenue=1039.85, order_count=5
+- `22:57–22:58`: total_revenue=52076.09, order_count=195
+
+200 orders and $53,115.94 total revenue either way — two independent code paths agreeing exactly is the same kind of proof as the partition-offset checks on earlier days, just applied to an aggregation instead of a count.
+
+**Infrastructure note**
+
+Spark needs a real JVM, so swapped the lightweight `python:3.11-slim` pattern for the official `apache/spark:3.5.0` image, pulling the Kafka connector via `--packages` at runtime (Maven, cached locally in a gitignored `.ivy-cache/` folder for faster reruns). Also hit the Kafka broker container having exited again since yesterday (same as Day 62) — same fix, `docker start kafka`.
