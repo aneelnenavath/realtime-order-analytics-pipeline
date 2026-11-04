@@ -145,3 +145,24 @@ Both approaches landed on identical numbers for both windows:
 **Infrastructure note**
 
 Spark needs a real JVM, so swapped the lightweight `python:3.11-slim` pattern for the official `apache/spark:3.5.0` image, pulling the Kafka connector via `--packages` at runtime (Maven, cached locally in a gitignored `.ivy-cache/` folder for faster reruns). Also hit the Kafka broker container having exited again since yesterday (same as Day 62) — same fix, `docker start kafka`.
+
+
+## Day 64 — Idempotent Postgres Sink
+
+Added the final stage of the pipeline shown in the original architecture plan: a Spark Structured Streaming job that writes the windowed revenue aggregation into Postgres, idempotently.
+
+**Infrastructure**
+
+A new long-lived `orders-postgres` container (Postgres 16, named volume for durability, on `daylog-net`) — long-lived like `kafka`, unlike the disposable Python containers used for the stream components.
+
+**The sink**
+
+`sink/postgres_sink.py` re-runs the same 1-minute windowed revenue aggregation from Day 63, but instead of a console sink, uses `foreachBatch` to run `INSERT ... ON CONFLICT (window_start) DO UPDATE` against a `revenue_by_minute` table per micro-batch — `window_start` is the primary key, so re-processing the same window updates that row in place instead of creating a duplicate.
+
+**Proving idempotency, not just claiming it**
+
+Ran the sink job twice against the same backlog of events. Both runs logged `upserted 2 window row(s)` — not 4 after the second run. Queried Postgres directly after each run: both times, exactly 2 rows, with identical totals matching Day 63's independently-verified numbers (`22:56–22:57`: $1,039.85 / 5 orders; `22:57–22:58`: $52,076.09 / 195 orders). The `updated_at` column changed between runs (`14:45:48` → `14:51:57`), confirming the second run genuinely re-processed and upserted in place rather than silently no-op'ing.
+
+**Proof**
+
+Two full pipeline runs, same 2 rows both times, same revenue totals both times, `updated_at` advancing each run — the strongest kind of idempotency proof available: actually running it twice and checking the end state, not just reading the upsert SQL and assuming it's correct.
