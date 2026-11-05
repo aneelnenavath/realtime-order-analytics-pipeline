@@ -11,9 +11,22 @@ BOOTSTRAP_SERVERS = "kafka:9092"
 VALID_STATUSES = {"completed", "pending", "cancelled"}
 REQUIRED_FIELDS = ["order_id", "customer_id", "product_id", "amount", "status", "event_timestamp"]
 
+# Optional fields: may or may not be present depending on which producer version sent the
+# event. Missing one of these is NOT a validation failure - it just gets a default value
+# during enrichment, so older events and newer events can both flow through unchanged.
+OPTIONAL_FIELDS_WITH_DEFAULTS = {
+    "region": "UNKNOWN",
+}
+
 
 def validate(event):
-    """Return None if the event is valid, otherwise a string reason it failed."""
+    """Return None if the event is valid, otherwise a string reason it failed.
+
+    Only REQUIRED_FIELDS are enforced here. A field disappearing (e.g. an upstream rename
+    like customer_id -> client_id without coordination) is still correctly caught as a
+    missing required field and routed to the DLQ - the contract is defined by what we
+    require, not by rejecting anything we don't recognise.
+    """
     for field in REQUIRED_FIELDS:
         if field not in event or event[field] is None:
             return f"missing required field: {field}"
@@ -42,6 +55,8 @@ def enrich(event):
     enriched = dict(event)
     enriched["processed_at"] = datetime.now(timezone.utc).isoformat()
     enriched["amount_tier"] = amount_tier(event["amount"])
+    for field, default in OPTIONAL_FIELDS_WITH_DEFAULTS.items():
+        enriched.setdefault(field, default)
     return enriched
 
 
@@ -53,7 +68,7 @@ def main():
         enable_auto_commit=True,
         group_id="validating-consumer-group",
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-        consumer_timeout_ms=10000,  # stop after 10s of no new messages
+        consumer_timeout_ms=10000,
     )
 
     producer = KafkaProducer(
@@ -75,7 +90,7 @@ def main():
                 enriched = enrich(event)
                 producer.send(VALID_TOPIC, key=enriched.get("customer_id"), value=enriched)
                 valid_count += 1
-                print(f"VALID  order_id={event.get('order_id')} tier={enriched['amount_tier']}")
+                print(f"VALID  order_id={event.get('order_id')} tier={enriched['amount_tier']} region={enriched['region']}")
             else:
                 dlq_record = {
                     "original_event": event,

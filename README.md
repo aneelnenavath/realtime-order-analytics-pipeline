@@ -187,3 +187,19 @@ Three-stage test against the live broker:
 **Proof**
 
 Three full states — healthy, deliberately broken, repaired — each confirmed against the live consumer group's real offsets, with the monitor correctly classifying all three via its exit code.
+
+## Day 66 — Schema Evolution Handling Mid-Stream
+
+Tested the pipeline against three real schema-drift scenarios in a single mixed batch: an additive field, a breaking rename, and the original schema unchanged — proving the system handles all three without crashing.
+
+**The scenario**
+
+`producer/schema_evolution_demo.py` sends 8 events onto `orders-events`: 3 **v1** events using the original schema unchanged, 3 **v2** events with a new additive `region` field (`UK`/`EU`/`US`), and 2 **breaking** events where `customer_id` was renamed to `client_id` without coordination — a genuinely incompatible change, not a synthetic one.
+
+**Evolving the consumer, not forking it**
+
+Updated the Day 62 `consumer/validating_consumer.py` in place, the way a real system actually evolves. Required fields stayed exactly as strict as before — unchanged on purpose, since that's what still catches the breaking rename automatically with zero new code. Added `OPTIONAL_FIELDS_WITH_DEFAULTS` so a new field like `region` can appear or not appear without anything breaking: present, it's preserved; absent, it defaults to `"UNKNOWN"` during enrichment.
+
+**Proof**
+
+Ran the mixed batch through: `valid=6 dlq=2`. v1 events landed as valid with `region=UNKNOWN` applied. v2 events landed as valid with their real region values intact. Both breaking-rename events landed correctly in the DLQ with `reason=missing required field: customer_id` - caught by the exact same validation logic that's been running since Day 62, with no changes needed to handle that case. Three different schema outcomes from one batch, nothing crashed, nothing silently corrupted.
