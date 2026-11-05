@@ -166,3 +166,24 @@ Ran the sink job twice against the same backlog of events. Both runs logged `ups
 **Proof**
 
 Two full pipeline runs, same 2 rows both times, same revenue totals both times, `updated_at` advancing each run — the strongest kind of idempotency proof available: actually running it twice and checking the end state, not just reading the upsert SQL and assuming it's correct.
+
+
+## Day 65 — Consumer Lag Monitoring and Alerting
+
+Added a monitoring check for the Day 62 validating consumer's actual Kafka lag — not a guess, a real comparison between committed offsets and the topic's live end offsets.
+
+**The monitor**
+
+`monitoring/consumer_lag_monitor.py` checks `validating-consumer-group`'s lag on `orders-events`: for each partition, it compares the group's committed offset against the topic's current end offset, sums the difference into a total, and compares that against a threshold. It exits `0` (OK) when healthy or `1` (ALERT) when not — the same contract a real scheduler or alerting system (cron, a monitoring platform, PagerDuty's check runner) expects from a health check, rather than something that has to be read by eye.
+
+**Proving it catches a real problem, not a synthetic one**
+
+Three-stage test against the live broker:
+
+1. Baseline: 0 lag, `OK`, exit 0 (73+51+81 committed = 205 end offset, fully caught up from Day 62).
+2. Reran the Day 61 producer to push 200 more events onto `orders-events` without consuming them. Reran the monitor: correctly detected 200 lag (61+65+74 across partitions), printed `ALERT: ... lag (200) exceeds threshold (50)`, exit 1.
+3. Ran the Day 62 validating consumer to drain the backlog (valid=200, dlq=0). Reran the monitor: lag back to 0 (134+116+155 committed = 405 end offset), `OK`, exit 0.
+
+**Proof**
+
+Three full states — healthy, deliberately broken, repaired — each confirmed against the live consumer group's real offsets, with the monitor correctly classifying all three via its exit code.
