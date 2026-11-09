@@ -6,13 +6,15 @@ rolling revenue aggregations, and sinks the results into Postgres -
 built incrementally, one capability at a time, with every stage proven
 against a live Kafka broker rather than just described.
 
-## Architecture (growing day by day)
+## Architecture
 
     Order producer --> Kafka (orders-events, 3 partitions)
         --> validating/enriching consumer --> clean / dead-letter topics
         --> windowed stream aggregation (revenue per minute)
         --> idempotent Postgres sink
         (+ consumer lag monitoring, schema evolution handling)
+
+Every stage above is built, wired together, and proven end-to-end (see Day 67).
 
 ## Stack
 
@@ -28,6 +30,16 @@ components run inside disposable containers on that same network
 (`docker run --network daylog-net ...`) rather than requiring a local
 Python environment with kafka-python installed - this keeps the project
 portable for anyone cloning the repo.
+
+Full pipeline, start to finish:
+
+1. `producer/order_event_generator.py` - produce orders
+2. `consumer/validating_consumer.py` - validate, enrich, split clean/DLQ
+3. `aggregation/windowed_revenue.py` - per-minute revenue aggregation
+4. `sink/postgres_sink.py` - idempotent upsert into Postgres
+5. `monitoring/consumer_lag_monitor.py` - exit-code health check for the consumer group
+
+See Day 67 below for a full run of all five, back to back, against one fresh batch.
 
 ## Day 61 - Project kickoff: architecture + order-event producer
 
@@ -203,3 +215,18 @@ Updated the Day 62 `consumer/validating_consumer.py` in place, the way a real sy
 **Proof**
 
 Ran the mixed batch through: `valid=6 dlq=2`. v1 events landed as valid with `region=UNKNOWN` applied. v2 events landed as valid with their real region values intact. Both breaking-rename events landed correctly in the DLQ with `reason=missing required field: customer_id` - caught by the exact same validation logic that's been running since Day 62, with no changes needed to handle that case. Three different schema outcomes from one batch, nothing crashed, nothing silently corrupted.
+## Day 67 - End-to-end verification + README polish
+
+With every stage of the pipeline built across the week - producer, validating/DLQ consumer, windowed aggregation, idempotent Postgres sink, consumer lag monitoring, schema evolution handling - the only thing not yet proven was that they all actually work together, back to back, against one fresh batch of data rather than each being tested in isolation on its own day.
+
+### Proof
+
+Sent 200 fresh events via the Day 61 producer, then ran the full chain against them in order:
+
+    1. producer/order_event_generator.py  -> 200 events sent to orders-events
+    2. consumer/validating_consumer.py    -> valid=200 dlq=0
+    3. aggregation/windowed_revenue.py    -> fresh windows aggregated correctly (183 + 17 = 200 orders)
+    4. sink/postgres_sink.py              -> upserted 6 window rows (idempotent upsert, no duplicates)
+    5. monitoring/consumer_lag_monitor.py -> total lag: 0, OK, exit 0
+
+All five stages passed clean on the same run, with no stage-specific workarounds needed. Also polished the Architecture and Running It sections above, which had been written day-by-day in a forward-looking, work-in-progress tense - they now describe the pipeline as what it is: a complete, working system.
